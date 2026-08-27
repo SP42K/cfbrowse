@@ -128,6 +128,16 @@ func Launch(opts Options) (*Browser, error) {
 	if err := os.MkdirAll(opts.UserDataDir, 0o755); err != nil {
 		return nil, err
 	}
+	// Chrome wants an absolute --user-data-dir. Given a relative one it does not
+	// complain: it silently falls back to the default profile, so no
+	// DevToolsActivePort ever appears where we poll for it, and if a normal
+	// Chrome is already running that fallback also hands the launch off to the
+	// existing instance and exits without a word on stderr.
+	abs, err := filepath.Abs(opts.UserDataDir)
+	if err != nil {
+		return nil, err
+	}
+	opts.UserDataDir = abs
 	// Stale port file would make us connect to the previous run.
 	portFile := filepath.Join(opts.UserDataDir, "DevToolsActivePort")
 	os.Remove(portFile)
