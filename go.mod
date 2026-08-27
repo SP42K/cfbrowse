@@ -1,4 +1,4 @@
-module cfbrowse
+module github.com/SP42K/cfbrowse
 
 go 1.26.3
 

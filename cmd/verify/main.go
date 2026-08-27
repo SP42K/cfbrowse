@@ -17,7 +17,7 @@ import (
 	"os"
 	"time"
 
-	"cfbrowse"
+	"github.com/SP42K/cfbrowse"
 )
 
 // shapeJS is site-agnostic on purpose: it reports what a page is made of so

@@ -10,13 +10,17 @@ go test ./...                    # needs google-chrome on PATH; skips if absent
 go test -run TestNeverEnablesRuntime -v .
 go vet ./...
 
-go run ./cmd/verify -profile ~/.cfbrowse-profiles/site 'https://…'            # headed, solve challenge once
-go run ./cmd/verify -headless -profile ~/.cfbrowse-profiles/site 'https://…'  # thereafter
-go run ./cmd/verify -headless -dump 'https://…'                               # tag/class shape of a page
+go run ./cmd/verify -headless -solve -profile ~/.cfbrowse-profiles/site 'https://…'
+go run ./cmd/verify -headless -dump 'https://…'                    # tag/class shape of a page
 go run ./cmd/verify -headless -eval 'document.title' 'https://…'
+go run ./cmd/verify -solve 'https://…'                             # headed, to watch it work
 ```
 
 No linter config, no CI, one dependency (`github.com/coder/websocket`). Two files carry the whole project: `browser.go` and `cmd/verify/main.go`.
+
+The module path is `github.com/SP42K/cfbrowse` and the repo is private, so consumers need `GOPRIVATE=github.com/SP42K/*` or a `go mod edit -replace` pointing at a local checkout. `browser.go` is the library; `cmd/verify` is a demo and a test harness, and nothing in it should ever become a dependency of the package.
+
+**`Solve` handles interactive challenges unattended, headless, from an empty profile.** Measured across two sites that both serve interactive challenges: headed and headless gave identical results (sixteen mouse events, `cf_clearance` obtained, full content). Do not reintroduce the claim that a human is needed for the first run — it was true of an earlier design and is not true now.
 
 ## The invariant
 

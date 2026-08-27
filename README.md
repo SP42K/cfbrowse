@@ -16,30 +16,61 @@ enabled. `browser_test.go` asserts the invariant.
 ## Use
 
 ```go
-b, _ := cfbrowse.Launch(cfbrowse.Options{
+import "github.com/SP42K/cfbrowse"
+
+b, err := cfbrowse.Launch(cfbrowse.Options{
     UserDataDir: os.ExpandEnv("$HOME/.cfbrowse-profiles/site"), // keeps cf_clearance
     Headless:    true,
 })
+if err != nil {
+    return err
+}
 defer b.Close()
 
-b.Navigate("https://example.com")
-title, _ := b.WaitReady(90 * time.Second)
-html, _ := b.EvalString("document.body.innerHTML")
+if err := b.Navigate("https://example.com"); err != nil {
+    return err
+}
+// Solve clicks a challenge if one appears; WaitReady only waits one out.
+title, err := b.Solve(90 * time.Second)
+if err != nil {
+    return err
+}
+html, err := b.EvalString("document.body.innerHTML")
 ```
 
-Interactive challenges still need a human once. Run headed, solve the checkbox,
-and the `cf_clearance` cookie persists in the profile; every later run can be
-headless.
-
-`cmd/verify` is a reachability check, not a scraper. It reports the title and
-whether a `cf_clearance` cookie was obtained; `-eval` runs your JavaScript.
-Site selectors belong in your project, not here.
+It is a private module, so point Go at it directly:
 
 ```sh
-go run ./cmd/verify -profile ~/.cfbrowse-profiles/site 'https://…'            # solve once
-go run ./cmd/verify -headless -profile ~/.cfbrowse-profiles/site 'https://…'  # thereafter
-go run ./cmd/verify -headless -dump 'https://…'                              # page shape
+go env -w GOPRIVATE=github.com/SP42K/*
+go get github.com/SP42K/cfbrowse
+```
+
+Or consume it from a checkout without a remote at all:
+
+```sh
+go mod edit -replace github.com/SP42K/cfbrowse=/path/to/cfbrowse
+```
+
+`Solve` clears an interactive challenge on its own, headless, from an empty
+profile. No human, no window, no first run that differs from the rest. Measured
+against two sites, both of which serve an interactive challenge: headed and
+headless produced identical results — sixteen mouse events, `cf_clearance`
+obtained, full content — so the mode is not a variable.
+
+Use a persistent `UserDataDir` anyway. Solving costs a few seconds and the
+`cf_clearance` it earns is reused until the site expires it, which on one site
+measured took under eleven minutes and on another survived many runs.
+
+`cmd/verify` is a reachability check, not a scraper. It reports the title,
+whether a `cf_clearance` cookie was obtained, and how many mouse events were
+dispatched; `-eval` runs your JavaScript. Site selectors belong in your project,
+not here.
+
+```sh
+go run ./cmd/verify -headless -solve -profile ~/.cfbrowse-profiles/site 'https://…'
+go run ./cmd/verify -headless -dump 'https://…'                    # page shape
 go run ./cmd/verify -headless -eval 'document.title' 'https://…'
+go run ./cmd/verify -solve 'https://…'                             # headed, to watch it work
 go test ./...
 ```
 
