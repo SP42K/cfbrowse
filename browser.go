@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -22,24 +23,6 @@ import (
 
 	"github.com/coder/websocket"
 )
-
-// realUA has no "HeadlessChrome" token; Chrome puts one there in headless mode
-// and cf_clearance is scored against the UA that earned it.
-//
-// The platform token has to match the machine it runs on: --user-agent rewrites
-// the UA header but not sec-ch-ua-platform, which Chrome always reports
-// honestly, so a Linux UA arriving with platform "Windows" is itself the tell.
-func realUA() string {
-	platform := "X11; Linux x86_64"
-	switch runtime.GOOS {
-	case "windows":
-		platform = "Windows NT 10.0; Win64; x64"
-	case "darwin":
-		platform = "Macintosh; Intel Mac OS X 10_15_7"
-	}
-	return "Mozilla/5.0 (" + platform + ") AppleWebKit/537.36 (KHTML, like Gecko) " +
-		"Chrome/152.0.0.0 Safari/537.36"
-}
 
 // defaultChrome locates the browser. "google-chrome" is a Linux PATH name: on
 // Windows the executable is chrome.exe and the installer does not put it on
@@ -78,16 +61,17 @@ type Options struct {
 	UserDataDir string // persistent profile; keeps cf_clearance between runs
 	Headless    bool
 	ExecPath    string // defaults to the platform's Chrome, see defaultChrome
-	UserAgent   string // defaults to realUA() for this platform
+	UserAgent   string // defaults to the browser's own UA, see resolveUA
 }
 
 type Browser struct {
-	cmd      *exec.Cmd
-	conn     *websocket.Conn
-	ctx      context.Context
-	cancel   context.CancelFunc
-	session  string
-	headless bool // reported in Solve's timeout, which is the one place it matters
+	cmd       *exec.Cmd
+	conn      *websocket.Conn
+	ctx       context.Context
+	cancel    context.CancelFunc
+	session   string
+	userAgent string
+	headless  bool // reported in Solve's timeout, which is the one place it matters
 
 	mu      sync.Mutex
 	nextID  int64
@@ -111,12 +95,64 @@ type message struct {
 	SessionID string `json:"sessionId,omitempty"`
 }
 
+// Launch starts Chrome and attaches to its page target.
+//
+// With no Options.UserAgent it starts Chrome twice: once to ask what it is,
+// then for real with a matching --user-agent. See resolveUA for why the extra
+// second is not optional.
 func Launch(opts Options) (*Browser, error) {
+	if opts.UserAgent == "" {
+		ua, err := resolveUA(opts)
+		if err != nil {
+			return nil, err
+		}
+		opts.UserAgent = ua
+	}
+	return launch(opts)
+}
+
+// resolveUA starts a throwaway Chrome to read its own UA, and returns it in the
+// shape a real Chrome sends.
+//
+// Everything about this is a concession to measurement, against a site that
+// clears in sixteen mouse events when the UA is right:
+//
+//   - The version cannot be hardcoded. Chrome reports its real major version in
+//     sec-ch-ua whatever the UA says, and a UA claiming 152 beside a hint saying
+//     151 fails the challenge outright. Same for the platform token against
+//     sec-ch-ua-platform.
+//   - The version cannot be asked for cheaply either. `chrome.exe --version` on
+//     Windows prints "Opening in existing browser session." and exits 0.
+//   - And the UA cannot be applied after launch. Emulation.setUserAgentOverride
+//     with the exact string that passes as a --user-agent flag still fails: the
+//     flag suppresses the client hints Chrome would otherwise contradict it
+//     with, and the CDP override does not.
+//
+// Which leaves asking the binary, over CDP, before the run that matters.
+func resolveUA(opts Options) (string, error) {
+	probe := opts
+	probe.Headless = true // never flash a window just to read a string
+	probe.UserAgent = "-" // sentinel: launch skips the flag, Chrome answers as itself
+	b, err := launch(probe)
+	if err != nil {
+		return "", err
+	}
+	var v struct {
+		UserAgent string `json:"userAgent"`
+	}
+	err = b.send("", "Browser.getVersion", map[string]any{}, &v)
+	// Close before the real launch: same profile, and Chrome holds a singleton
+	// lock on it.
+	b.Close()
+	if err != nil {
+		return "", err
+	}
+	return frozenUA(v.UserAgent), nil
+}
+
+func launch(opts Options) (*Browser, error) {
 	if opts.ExecPath == "" {
 		opts.ExecPath = defaultChrome()
-	}
-	if opts.UserAgent == "" {
-		opts.UserAgent = realUA()
 	}
 	if opts.UserDataDir == "" {
 		d, err := os.MkdirTemp("", "cfbrowse-")
@@ -151,7 +187,11 @@ func Launch(opts Options) (*Browser, error) {
 	args := []string{
 		"--remote-debugging-port=0",
 		"--user-data-dir=" + opts.UserDataDir,
-		"--user-agent=" + opts.UserAgent,
+	}
+	if opts.UserAgent != "-" {
+		args = append(args, "--user-agent="+opts.UserAgent)
+	}
+	args = append(args,
 		// Drops navigator.webdriver without the --enable-automation banner,
 		// which is itself a tell.
 		"--disable-blink-features=AutomationControlled",
@@ -161,7 +201,7 @@ func Launch(opts Options) (*Browser, error) {
 		"--password-store=basic",
 		"--homepage=about:blank",
 		"about:blank",
-	}
+	)
 	if opts.Headless {
 		args = append([]string{"--headless=new"}, args...)
 	}
@@ -190,7 +230,8 @@ func Launch(opts Options) (*Browser, error) {
 	conn.SetReadLimit(64 << 20) // pages can be large; the 32KB default truncates
 
 	b := &Browser{cmd: cmd, conn: conn, ctx: ctx, cancel: cancel,
-		headless: opts.Headless, pending: map[int64]chan result{}}
+		headless: opts.Headless, userAgent: opts.UserAgent,
+		pending: map[int64]chan result{}}
 	go b.readLoop()
 
 	if err := b.attachToPage(); err != nil {
@@ -323,6 +364,20 @@ func (b *Browser) attachToPage() error {
 	// Page is safe to enable; Runtime is the one that leaks. Never enable it.
 	return b.send(b.session, "Page.enable", map[string]any{}, nil)
 }
+
+// reChromeToken matches the product token, headless or not, with however many
+// version components Chrome felt like reporting.
+var reChromeToken = regexp.MustCompile(`(?:Headless)?Chrome/(\d+)(?:\.\d+)*`)
+
+// frozenUA rewrites the product token to Chrome's frozen form. It is separate
+// from setUserAgent so it can be tested without a browser.
+func frozenUA(ua string) string {
+	return reChromeToken.ReplaceAllString(ua, "Chrome/$1.0.0.0")
+}
+
+// UserAgent reports the UA the page actually sends. Callers that store a
+// cf_clearance have to store this alongside it; the cookie is scored against it.
+func (b *Browser) UserAgent() string { return b.userAgent }
 
 func (b *Browser) Navigate(url string) error {
 	return b.send(b.session, "Page.navigate", map[string]any{"url": url}, nil)
