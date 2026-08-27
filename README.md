@@ -48,6 +48,12 @@ go test ./...
 - Isolated worlds see the DOM but not the page's own JS globals.
 - No event subscriptions; waiting is done by polling.
 - One page target, no tab management.
+- Clearance lifetime varies wildly by site and is the thing that will bite you.
+  One site tested had its clearance rejected eleven minutes after a solve;
+  another's survived across many runs. Headless is not the discriminator — a
+  headless run fifty seconds after a fresh solve passed in nine. Expect to
+  re-solve, and treat a returning challenge as expiry rather than as a
+  fingerprinting problem.
 - Fingerprint hardening stops at UA + `AutomationControlled`. On WSL,
   `WEBGL_debug_renderer_info` returns nothing (no GPU), which a strict checker
   can score against.
