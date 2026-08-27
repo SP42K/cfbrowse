@@ -90,6 +90,17 @@ work, and neither costs the invariant:
   with `pierce: true` walks closed shadow roots and nested documents;
   `DOM.getBoxModel` turns the node into coordinates. Neither needs an enable.
 
+`SolveProgress` is `Solve` with a callback, for callers that put this wait in
+front of a person. It reports `waiting` / `widget` / `clicking` / `cleared` and
+fires only on a change, so a UI can say "clicking it for the third time" instead
+of spinning for ninety seconds:
+
+```go
+title, err := b.SolveProgress(90*time.Second, func(phase string, attempt int) {
+    log.Printf("solve: %s (attempt %d)", phase, attempt)
+})
+```
+
 `verify` prints `mouse events sent`, which is not decoration: a challenge that
 clears on its own and one that was clicked produce identical output otherwise,
 and confusing the two sends you debugging the wrong layer. Eight events is one

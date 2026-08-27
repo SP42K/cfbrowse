@@ -679,6 +679,33 @@ func (b *Browser) dispatchMouse(kind string, x, y float64, clicks int) error {
 // A page that was never challenged returns as soon as its title settles, so
 // Solve is safe to use in place of WaitReady.
 func (b *Browser) Solve(limit time.Duration) (string, error) {
+	return b.SolveProgress(limit, nil)
+}
+
+// Solve's phases, as reported to SolveProgress's callback.
+const (
+	// StepWaiting: the page is not readable yet, or the widget has not rendered.
+	// It renders a beat after the interstitial, so this is the normal opening.
+	StepWaiting = "waiting"
+	// StepWidget: the widget was located, but this pass is not clicking it —
+	// either the attempt budget is spent or the cooldown has not elapsed.
+	StepWidget = "widget"
+	// StepClicking: a click cycle is being dispatched. attempt is 1-based.
+	StepClicking = "clicking"
+	// StepCleared: the challenge is gone. Solve returns right after this.
+	StepCleared = "cleared"
+)
+
+// SolveProgress is Solve with a progress callback, for callers that put this
+// wait in front of a person. It can take a minute and a half, and "still
+// waiting for the widget to render" and "clicking it for the third time" are
+// different enough that one spinner for all of it reads as a hang.
+//
+// onStep may be nil. It fires only when the phase actually changes — the loop
+// polls at 1 Hz and would otherwise report waiting ninety times — and it runs
+// on Solve's own goroutine, so keep it cheap and non-blocking: the poll cadence
+// is itself part of what the site scores.
+func (b *Browser) SolveProgress(limit time.Duration, onStep func(phase string, attempt int)) (string, error) {
 	const maxClicks = 3
 	deadline := time.Now().Add(limit)
 	var lastClick time.Time
@@ -686,6 +713,15 @@ func (b *Browser) Solve(limit time.Duration) (string, error) {
 	var title string
 	clicks := 0
 	sawWidget := false
+
+	lastPhase, lastAttempt := "", -1
+	step := func(phase string, attempt int) {
+		if onStep == nil || (phase == lastPhase && attempt == lastAttempt) {
+			return
+		}
+		lastPhase, lastAttempt = phase, attempt
+		onStep(phase, attempt)
+	}
 
 	for time.Now().Before(deadline) {
 		time.Sleep(time.Second)
@@ -695,6 +731,7 @@ func (b *Browser) Solve(limit time.Duration) (string, error) {
 			continue
 		}
 		if done {
+			step(StepCleared, clicks)
 			title, _ = b.EvalString("document.title")
 			return title, nil
 		}
@@ -703,14 +740,20 @@ func (b *Browser) Solve(limit time.Duration) (string, error) {
 			lastErr = err
 		}
 		if err != nil || box == nil {
-			continue // widget renders a beat after the interstitial
+			step(StepWaiting, 0) // widget renders a beat after the interstitial
+			continue
 		}
 		sawWidget = true
 		// Turnstile sometimes needs a second go, but hammering it is itself a
 		// signal; leave it time to run between attempts.
 		if clicks >= maxClicks || time.Since(lastClick) < 8*time.Second {
+			step(StepWidget, clicks)
 			continue
 		}
+		// Reported before the click, not after: the cycle walks the cursor in
+		// over six moves and takes the better part of a second, and that second
+		// is exactly the one the caller wants named.
+		step(StepClicking, clicks+1)
 		if err := b.clickWidget(box); err != nil {
 			return "", fmt.Errorf("clicking challenge widget: %w", err)
 		}

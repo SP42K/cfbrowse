@@ -72,7 +72,14 @@ func run() error {
 	}
 	reach := b.WaitReady
 	if *solve {
-		reach = b.Solve
+		// Print the phases as they happen. A -solve run is mostly silence
+		// followed by one line ninety seconds later; when it times out, knowing
+		// whether the widget ever rendered is the whole diagnosis.
+		reach = func(limit time.Duration) (string, error) {
+			return b.SolveProgress(limit, func(phase string, attempt int) {
+				fmt.Fprintf(os.Stderr, "solve: %s (attempt %d)\n", phase, attempt)
+			})
+		}
 	}
 	title, err := reach(*wait)
 	if err != nil {

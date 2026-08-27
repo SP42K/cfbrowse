@@ -42,6 +42,13 @@ Consequences to respect when adding features:
 - **The widget is invisible to JavaScript.** Cloudflare renders it in a *closed* shadow root: a page displaying a checkbox on screen reports zero iframes and zero open shadow roots to `querySelectorAll`. Four rounds were lost to selector-widening before this was measured. Locate it with `DOM.getDocument {pierce: true}` (walks closed shadow roots and nested documents) and `DOM.getBoxModel`; never with `document.querySelector`.
 - **The click must be `Input.dispatchMouseEvent`.** It is injected below Blink's event plumbing so the page sees `isTrusted` events. `element.click()` cannot reach the node at all, and synthetic DOM events are untrusted regardless.
 
+`SolveProgress` is the same loop with a change-only callback (`waiting` /
+`widget` / `clicking` / `cleared`); `Solve` is now a nil-callback wrapper around
+it. The dedup lives in the library, not the caller — the loop polls at 1 Hz and
+every consumer would otherwise write the same "did the phase change" guard. The
+callback runs on Solve's goroutine, so a slow one drags the poll cadence, which
+is itself scored.
+
 `cmd/verify` prints `mouse events sent` because a self-clearing challenge and a solved one are otherwise indistinguishable in the output — a success was misread as a failure, and later a failure as a success, before this counter existed. Eight events is one click cycle (six `mouseMoved`, then press and release).
 
 Two mistakes worth not repeating, both already made in this file's history:
