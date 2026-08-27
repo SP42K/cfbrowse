@@ -35,11 +35,12 @@ type Options struct {
 }
 
 type Browser struct {
-	cmd     *exec.Cmd
-	conn    *websocket.Conn
-	ctx     context.Context
-	cancel  context.CancelFunc
-	session string
+	cmd      *exec.Cmd
+	conn     *websocket.Conn
+	ctx      context.Context
+	cancel   context.CancelFunc
+	session  string
+	headless bool // reported in Solve's timeout, which is the one place it matters
 
 	mu      sync.Mutex
 	nextID  int64
@@ -132,7 +133,7 @@ func Launch(opts Options) (*Browser, error) {
 	conn.SetReadLimit(64 << 20) // pages can be large; the 32KB default truncates
 
 	b := &Browser{cmd: cmd, conn: conn, ctx: ctx, cancel: cancel,
-		pending: map[int64]chan result{}}
+		headless: opts.Headless, pending: map[int64]chan result{}}
 	go b.readLoop()
 
 	if err := b.attachToPage(); err != nil {
@@ -351,11 +352,13 @@ func (b *Browser) WaitReady(limit time.Duration) (string, error) {
 		// indefinitely and a complete-first check waits forever. The title is
 		// the signal that actually flips.
 		state, _ = b.EvalString("document.readyState")
-		title, lastErr = b.EvalString("document.title")
+		var done bool
+		done, lastErr = b.cleared()
 		if lastErr != nil {
 			continue
 		}
-		if title != "" && !strings.Contains(title, "Just a moment") {
+		if done {
+			title, _ = b.EvalString("document.title")
 			return title, nil
 		}
 	}
@@ -366,6 +369,261 @@ func (b *Browser) WaitReady(limit time.Duration) (string, error) {
 	}
 	return title, fmt.Errorf("still on challenge after %s (readyState=%q title=%q)",
 		limit, state, title)
+}
+
+// challengeBox is the on-screen rectangle of the Turnstile widget, in CSS
+// pixels relative to the viewport.
+type challengeBox struct {
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
+	W float64 `json:"w"`
+	H float64 `json:"h"`
+}
+
+// probeJS reports what the page is actually made of when no widget matched.
+// document.querySelectorAll does not pierce shadow roots, so a bare iframe
+// count can read "none" while the challenge sits one boundary away; this walks
+// open shadow roots too and says which boundaries were closed to it.
+const probeJS = `(() => {
+  const seen = [], shadows = [];
+  const walk = (root, depth) => {
+    if (depth > 4) return;
+    root.querySelectorAll('*').forEach(el => {
+      if (el.tagName === 'IFRAME') {
+        const r = el.getBoundingClientRect();
+        seen.push('iframe ' + (el.getAttribute('src') || '(no src)').slice(0, 60) +
+                  ' [' + Math.round(r.width) + 'x' + Math.round(r.height) + ']');
+      }
+      if (el.shadowRoot) {
+        shadows.push('open:' + el.tagName.toLowerCase() +
+                     (el.id ? '#' + el.id : ''));
+        walk(el.shadowRoot, depth + 1);
+      }
+    });
+  };
+  walk(document, 0);
+  const bodyKids = [...(document.body ? document.body.children : [])]
+    .slice(0, 8)
+    .map(e => e.tagName.toLowerCase() + (e.id ? '#' + e.id : '') +
+              (e.className && typeof e.className === 'string'
+                 ? '.' + e.className.trim().split(/\\s+/).join('.') : ''));
+  return JSON.stringify({
+    title: document.title,
+    readyState: document.readyState,
+    href: location.href.slice(0, 100),
+    iframes: seen.length ? seen : 'none',
+    openShadowRoots: shadows.length ? shadows : 'none',
+    bodyChildren: bodyKids,
+  });
+})()`
+
+// cleared reports whether the interstitial is gone.
+//
+// This gates on the title, which was doubted once and should not be again. A
+// marker-based check (window._cf_chl_opt, #challenge-running) matched nothing
+// on a real interstitial and so declared a still-challenged page ready: it
+// returned success with no cf_clearance and no content. A false pass is worse
+// than a slow one.
+func (b *Browser) cleared() (bool, error) {
+	title, err := b.EvalString("document.title")
+	if err != nil {
+		return false, err
+	}
+	return title != "" && !strings.Contains(title, "Just a moment"), nil
+}
+
+// challengeWidget locates the clickable challenge element through CDP.
+//
+// JavaScript cannot find it: Cloudflare renders the widget inside a closed
+// shadow root, so a page displaying a checkbox on screen reports zero iframes
+// and zero open shadow roots to querySelectorAll. DOM.getDocument with
+// pierce:true walks closed shadow roots and nested documents, and like
+// everything else here it needs no domain enable.
+func (b *Browser) challengeWidget() (*challengeBox, error) {
+	var doc struct {
+		Root domNode `json:"root"`
+	}
+	if err := b.send(b.session, "DOM.getDocument",
+		map[string]any{"depth": -1, "pierce": true}, &doc); err != nil {
+		return nil, err
+	}
+	id := findWidget(&doc.Root)
+	if id == 0 {
+		return nil, nil
+	}
+	var bm struct {
+		Model struct {
+			Content []float64 `json:"content"` // x1,y1 … x4,y4, clockwise
+		} `json:"model"`
+	}
+	if err := b.send(b.session, "DOM.getBoxModel", map[string]any{"nodeId": id}, &bm); err != nil {
+		// The node can vanish between the two calls; treat it as not-yet-there.
+		return nil, nil
+	}
+	q := bm.Model.Content
+	if len(q) < 8 {
+		return nil, nil
+	}
+	return &challengeBox{X: q[0], Y: q[1], W: q[2] - q[0], H: q[5] - q[1]}, nil
+}
+
+type domNode struct {
+	NodeID      int       `json:"nodeId"`
+	NodeName    string    `json:"nodeName"`
+	Attributes  []string  `json:"attributes"` // flat name,value,name,value…
+	Children    []domNode `json:"children"`
+	ShadowRoots []domNode `json:"shadowRoots"`
+	ContentDoc  *domNode  `json:"contentDocument"`
+}
+
+func (n *domNode) attr(name string) string {
+	for i := 0; i+1 < len(n.Attributes); i += 2 {
+		if n.Attributes[i] == name {
+			return n.Attributes[i+1]
+		}
+	}
+	return ""
+}
+
+// findWidget returns the nodeId of the challenge's clickable element. The
+// challenge iframe is preferred; a bare checkbox is the fallback for
+// interstitials that render without one.
+func findWidget(n *domNode) int {
+	if n == nil {
+		return 0
+	}
+	switch n.NodeName {
+	case "IFRAME":
+		src := n.attr("src")
+		if strings.Contains(src, "challenges.cloudflare.com") ||
+			strings.Contains(src, "/cdn-cgi/challenge-platform/") ||
+			strings.Contains(src, "turnstile") {
+			return n.NodeID
+		}
+	case "INPUT":
+		if n.attr("type") == "checkbox" {
+			return n.NodeID
+		}
+	}
+	for i := range n.Children {
+		if id := findWidget(&n.Children[i]); id != 0 {
+			return id
+		}
+	}
+	for i := range n.ShadowRoots {
+		if id := findWidget(&n.ShadowRoots[i]); id != 0 {
+			return id
+		}
+	}
+	return findWidget(n.ContentDoc)
+}
+
+// clickWidget dispatches real mouse input at the widget's checkbox.
+//
+// Input.dispatchMouseEvent is injected below Blink's event plumbing, so the
+// page sees isTrusted events that cross into the challenge iframe like a
+// human's would — element.click() cannot reach across the origin boundary at
+// all, and synthetic DOM events are marked untrusted anyway. The Input domain
+// needs no enable, so this costs nothing against the package invariant.
+func (b *Browser) clickWidget(box *challengeBox) error {
+	// ponytail: the checkbox's position is assumed, not measured — nothing
+	// outside the iframe can see it. Cloudflare puts it at the left edge,
+	// vertically centred. If a redesign moves it, this offset is what breaks.
+	inset := 30.0
+	if w := box.W * 0.15; w < inset {
+		inset = w
+	}
+	tx, ty := box.X+inset, box.Y+box.H/2
+
+	// Arriving instantly at the target is itself a behavioural tell, so walk
+	// the cursor in from an offset before pressing.
+	const steps = 6
+	sx, sy := tx-120, ty-90
+	for i := 1; i <= steps; i++ {
+		f := float64(i) / steps
+		if err := b.dispatchMouse("mouseMoved", sx+(tx-sx)*f, sy+(ty-sy)*f, 0); err != nil {
+			return err
+		}
+		time.Sleep(60 * time.Millisecond)
+	}
+	if err := b.dispatchMouse("mousePressed", tx, ty, 1); err != nil {
+		return err
+	}
+	time.Sleep(80 * time.Millisecond)
+	return b.dispatchMouse("mouseReleased", tx, ty, 1)
+}
+
+func (b *Browser) dispatchMouse(kind string, x, y float64, clicks int) error {
+	p := map[string]any{"type": kind, "x": x, "y": y, "button": "left", "clickCount": clicks}
+	if kind == "mousePressed" {
+		p["buttons"] = 1
+	}
+	return b.send(b.session, "Input.dispatchMouseEvent", p, nil)
+}
+
+// Solve gets past an interactive challenge, clicking the Turnstile widget with
+// real mouse input if one appears, and returns the page title once through.
+//
+// A page that was never challenged returns as soon as its title settles, so
+// Solve is safe to use in place of WaitReady.
+func (b *Browser) Solve(limit time.Duration) (string, error) {
+	const maxClicks = 3
+	deadline := time.Now().Add(limit)
+	var lastClick time.Time
+	var lastErr error
+	var title string
+	clicks := 0
+	sawWidget := false
+
+	for time.Now().Before(deadline) {
+		time.Sleep(time.Second)
+		var done bool
+		done, lastErr = b.cleared()
+		if lastErr != nil {
+			continue
+		}
+		if done {
+			title, _ = b.EvalString("document.title")
+			return title, nil
+		}
+		box, err := b.challengeWidget()
+		if err != nil {
+			lastErr = err
+		}
+		if err != nil || box == nil {
+			continue // widget renders a beat after the interstitial
+		}
+		sawWidget = true
+		// Turnstile sometimes needs a second go, but hammering it is itself a
+		// signal; leave it time to run between attempts.
+		if clicks >= maxClicks || time.Since(lastClick) < 8*time.Second {
+			continue
+		}
+		if err := b.clickWidget(box); err != nil {
+			return "", fmt.Errorf("clicking challenge widget: %w", err)
+		}
+		clicks++
+		lastClick = time.Now()
+	}
+
+	switch {
+	// Checked before the widget cases on purpose: an eval that never succeeded
+	// means the loop never saw a title or a widget, so blaming the widget would
+	// point at the wrong layer. WaitReady learned this the expensive way.
+	case lastErr != nil && !sawWidget:
+		return "", fmt.Errorf("gave up after %s: page never became readable "+
+			"(last title=%q); last eval error: %w", limit, title, lastErr)
+	case !sawWidget:
+		probe, _ := b.EvalString(probeJS)
+		return "", fmt.Errorf("no challenge widget appeared within %s; page probe: %s",
+			limit, probe)
+	case b.headless:
+		return "", fmt.Errorf("clicked the widget %d time(s), still challenged after %s "+
+			"— headless auto-solve failed; rerun without headless mode", clicks, limit)
+	default:
+		return "", fmt.Errorf("clicked the widget %d time(s), still challenged after %s",
+			clicks, limit)
+	}
 }
 
 type Cookie struct {

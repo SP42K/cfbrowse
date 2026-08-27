@@ -14,7 +14,6 @@ package main
 import (
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"time"
 
@@ -37,11 +36,23 @@ const shapeJS = `(() => {
   }, null, 1);
 })()`
 
+// main does nothing but set the exit code. Every early exit used to go through
+// log.Fatal, whose os.Exit skips deferred calls — so a failed run left its
+// whole Chrome process tree running and holding the profile lock. Errors have
+// to travel back here as values for `defer b.Close()` to ever run.
 func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	headless := flag.Bool("headless", false, "run without a window")
 	profile := flag.String("profile", "", "persistent profile dir (keeps cf_clearance)")
 	wait := flag.Duration("wait", 90*time.Second, "how long to allow for the challenge")
 	settle := flag.Duration("settle", 0, "extra pause after the challenge clears, for SPAs")
+	solve := flag.Bool("solve", false, "click the challenge widget instead of waiting for a human")
 	dump := flag.Bool("dump", false, "print the page's tag and class shape")
 	eval := flag.String("eval", "", "JavaScript to run once the page is reachable")
 	flag.Parse()
@@ -52,18 +63,32 @@ func main() {
 
 	b, err := cfbrowse.Launch(cfbrowse.Options{UserDataDir: *profile, Headless: *headless})
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	defer b.Close()
 
 	if err := b.Navigate(flag.Arg(0)); err != nil {
-		log.Fatal(err)
+		return err
 	}
-	title, err := b.WaitReady(*wait)
+	reach := b.WaitReady
+	if *solve {
+		reach = b.Solve
+	}
+	title, err := reach(*wait)
 	if err != nil {
-		log.Fatalf("%v\n(rerun without -headless and solve the challenge once)", err)
+		return fmt.Errorf("%w\n(retry with -solve, or headed so you can click it yourself)", err)
 	}
-	fmt.Fprintf(os.Stderr, "title: %s\ncf_clearance: %v\n", title, b.HasClearance())
+	// Whether the widget was actually clicked is not visible in the outcome:
+	// a challenge that clears itself looks identical to one that was solved.
+	// Counting the dispatched input is the only way to tell them apart.
+	moves := 0
+	for _, m := range b.SentMethods() {
+		if m == "Input.dispatchMouseEvent" {
+			moves++
+		}
+	}
+	fmt.Fprintf(os.Stderr, "title: %s\ncf_clearance: %v\nmouse events sent: %d\n",
+		title, b.HasClearance(), moves)
 
 	if *settle > 0 {
 		time.Sleep(*settle)
@@ -73,11 +98,12 @@ func main() {
 		js = shapeJS
 	}
 	if js == "" {
-		return
+		return nil
 	}
 	out, err := b.EvalString(js)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	fmt.Println(out)
+	return nil
 }

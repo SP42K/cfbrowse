@@ -43,6 +43,27 @@ go run ./cmd/verify -headless -eval 'document.title' 'https://…'
 go test ./...
 ```
 
+## Solving the checkbox
+
+`Solve` clears an interactive challenge without a human. Two things make it
+work, and neither costs the invariant:
+
+- **The click is real input.** `Input.dispatchMouseEvent` is injected below
+  Blink's event plumbing, so the page sees `isTrusted` events. `element.click()`
+  could not work even in principle — the widget is not reachable from script,
+  and synthetic DOM events are marked untrusted anyway. The cursor is walked in
+  over six steps before the press; arriving instantly is itself a tell.
+- **The widget is found through CDP, not JavaScript.** Cloudflare renders it
+  inside a closed shadow root, so a page visibly showing a checkbox reports zero
+  iframes and zero open shadow roots to `querySelectorAll`. `DOM.getDocument`
+  with `pierce: true` walks closed shadow roots and nested documents;
+  `DOM.getBoxModel` turns the node into coordinates. Neither needs an enable.
+
+`verify` prints `mouse events sent`, which is not decoration: a challenge that
+clears on its own and one that was clicked produce identical output otherwise,
+and confusing the two sends you debugging the wrong layer. Eight events is one
+click cycle.
+
 ## Limits
 
 - Isolated worlds see the DOM but not the page's own JS globals.

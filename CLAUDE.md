@@ -29,6 +29,21 @@ Consequences to respect when adding features:
 - JS evaluation goes through `Page.createIsolatedWorld` → `Runtime.evaluate` with an explicit `contextId`. The world is recreated per `Eval` call on purpose (navigation invalidates it; caching only buys stale-handle bugs).
 - Cookies use `Storage.getCookies` (browser-level) so the **Network** domain also stays disabled. Prefer browser-level or `Page.*` commands over anything requiring a domain enable.
 - `Page.enable` is the only domain enabled. No CDP events are subscribed to — `readLoop` drops every message without an `id`. Waiting is therefore polling (`WaitReady` polls at 1 Hz), not event-driven.
+- `Solve` reaches for `Input.dispatchMouseEvent`, `DOM.getDocument` and `DOM.getBoxModel`. None of the three requires enabling its domain, which is why they are allowed. The test now asserts an **allowlist** (`Page.enable` only) rather than a `Runtime.enable` denylist, so a future feature that reaches for `Network.enable` or `DOM.enable` trips the same gate.
+
+## Solving challenges
+
+`Solve` clicks the Turnstile checkbox. Two findings, both established by measurement and both easy to get wrong again:
+
+- **The widget is invisible to JavaScript.** Cloudflare renders it in a *closed* shadow root: a page displaying a checkbox on screen reports zero iframes and zero open shadow roots to `querySelectorAll`. Four rounds were lost to selector-widening before this was measured. Locate it with `DOM.getDocument {pierce: true}` (walks closed shadow roots and nested documents) and `DOM.getBoxModel`; never with `document.querySelector`.
+- **The click must be `Input.dispatchMouseEvent`.** It is injected below Blink's event plumbing so the page sees `isTrusted` events. `element.click()` cannot reach the node at all, and synthetic DOM events are untrusted regardless.
+
+`cmd/verify` prints `mouse events sent` because a self-clearing challenge and a solved one are otherwise indistinguishable in the output — a success was misread as a failure, and later a failure as a success, before this counter existed. Eight events is one click cycle (six `mouseMoved`, then press and release).
+
+Two mistakes worth not repeating, both already made in this file's history:
+
+- **Do not gate readiness on challenge markers.** `window._cf_chl_opt` and `#challenge-running` matched nothing on a real interstitial, so the gate declared a still-challenged page ready and returned with no `cf_clearance` and no content. The title gate is the correct one.
+- **Never swallow an eval error in a polling loop.** `WaitReady` was fixed for this, then `Solve` was written with the same bug, and its timeout blamed the widget for what was an evaluation failure. Report `lastErr` ahead of any other diagnosis.
 
 ## Architecture
 

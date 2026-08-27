@@ -29,9 +29,12 @@ func TestNeverEnablesRuntime(t *testing.T) {
 	if v, err := b.EvalString("document.querySelector('h1').textContent"); err != nil || v == "" {
 		t.Fatalf("DOM unreachable from the isolated world: %q %v", v, err)
 	}
+	// Stated as an allowlist rather than a Runtime.enable denylist: enabling
+	// any other domain is the same class of mistake, and this way a future
+	// feature that reaches for Network.enable or DOM.enable trips the gate too.
 	for _, m := range b.SentMethods() {
-		if m == "Runtime.enable" {
-			t.Fatal("Runtime.enable was sent — the leak this package exists to avoid")
+		if strings.HasSuffix(m, ".enable") && m != "Page.enable" {
+			t.Fatalf("%s was sent; Page.enable is the only domain this package may enable", m)
 		}
 	}
 }
