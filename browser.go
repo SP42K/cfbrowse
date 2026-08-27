@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -24,14 +25,60 @@ import (
 
 // realUA has no "HeadlessChrome" token; Chrome puts one there in headless mode
 // and cf_clearance is scored against the UA that earned it.
-const realUA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) " +
-	"Chrome/152.0.0.0 Safari/537.36"
+//
+// The platform token has to match the machine it runs on: --user-agent rewrites
+// the UA header but not sec-ch-ua-platform, which Chrome always reports
+// honestly, so a Linux UA arriving with platform "Windows" is itself the tell.
+func realUA() string {
+	platform := "X11; Linux x86_64"
+	switch runtime.GOOS {
+	case "windows":
+		platform = "Windows NT 10.0; Win64; x64"
+	case "darwin":
+		platform = "Macintosh; Intel Mac OS X 10_15_7"
+	}
+	return "Mozilla/5.0 (" + platform + ") AppleWebKit/537.36 (KHTML, like Gecko) " +
+		"Chrome/152.0.0.0 Safari/537.36"
+}
+
+// defaultChrome locates the browser. "google-chrome" is a Linux PATH name: on
+// Windows the executable is chrome.exe and the installer does not put it on
+// PATH, on macOS it lives inside the .app bundle. Falls back to the bare name
+// so a miss surfaces as exec's own "executable file not found".
+func defaultChrome() string {
+	switch runtime.GOOS {
+	case "windows":
+		if p, err := exec.LookPath("chrome.exe"); err == nil {
+			return p
+		}
+		for _, dir := range []string{
+			os.Getenv("ProgramFiles"),
+			os.Getenv("ProgramFiles(x86)"),
+			os.Getenv("LocalAppData"),
+		} {
+			if dir == "" {
+				continue
+			}
+			p := filepath.Join(dir, "Google", "Chrome", "Application", "chrome.exe")
+			if _, err := os.Stat(p); err == nil {
+				return p
+			}
+		}
+		return "chrome.exe"
+	case "darwin":
+		const p = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return "google-chrome"
+}
 
 type Options struct {
 	UserDataDir string // persistent profile; keeps cf_clearance between runs
 	Headless    bool
-	ExecPath    string // defaults to google-chrome
-	UserAgent   string // defaults to realUA
+	ExecPath    string // defaults to the platform's Chrome, see defaultChrome
+	UserAgent   string // defaults to realUA() for this platform
 }
 
 type Browser struct {
@@ -66,10 +113,10 @@ type message struct {
 
 func Launch(opts Options) (*Browser, error) {
 	if opts.ExecPath == "" {
-		opts.ExecPath = "google-chrome"
+		opts.ExecPath = defaultChrome()
 	}
 	if opts.UserAgent == "" {
-		opts.UserAgent = realUA
+		opts.UserAgent = realUA()
 	}
 	if opts.UserDataDir == "" {
 		d, err := os.MkdirTemp("", "cfbrowse-")

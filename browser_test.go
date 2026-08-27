@@ -1,6 +1,7 @@
 package cfbrowse
 
 import (
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -36,5 +37,27 @@ func TestNeverEnablesRuntime(t *testing.T) {
 		if strings.HasSuffix(m, ".enable") && m != "Page.enable" {
 			t.Fatalf("%s was sent; Page.enable is the only domain this package may enable", m)
 		}
+	}
+}
+
+// The platform defaults are the one place this package guesses about the host,
+// and both guesses are silent when wrong: a mismatched UA platform token only
+// shows up as a lower bot score, and a bad exec path only as Chrome not
+// starting.
+func TestPlatformDefaults(t *testing.T) {
+	ua := realUA()
+	if strings.Contains(ua, "HeadlessChrome") {
+		t.Fatalf("realUA leaks the headless token: %q", ua)
+	}
+	want := map[string]string{
+		"windows": "Windows NT",
+		"darwin":  "Mac OS X",
+		"linux":   "X11; Linux",
+	}[runtime.GOOS]
+	if want != "" && !strings.Contains(ua, want) {
+		t.Fatalf("realUA on %s = %q, want it to say %q", runtime.GOOS, ua, want)
+	}
+	if defaultChrome() == "" {
+		t.Fatal("defaultChrome returned an empty path; exec would report a useless error")
 	}
 }

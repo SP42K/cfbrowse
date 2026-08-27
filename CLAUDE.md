@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```sh
 go build ./...
-go test ./...                    # needs google-chrome on PATH; skips if absent
+go test ./...                    # needs Chrome (see defaultChrome); skips if absent
 go test -run TestNeverEnablesRuntime -v .
 go vet ./...
 
@@ -57,7 +57,7 @@ One page target, no tab management. `Browser` is not designed for concurrent use
 
 Session/anti-detection details that are load-bearing, not incidental:
 
-- `realUA` deliberately omits the `HeadlessChrome` token — `cf_clearance` is scored against the UA that earned it, so changing the UA invalidates existing profiles.
+- `realUA()` deliberately omits the `HeadlessChrome` token — `cf_clearance` is scored against the UA that earned it, so changing the UA invalidates existing profiles. Its platform token follows `runtime.GOOS`: `--user-agent` rewrites the UA header but not `sec-ch-ua-platform`, which Chrome reports honestly, so a Linux UA on a Windows host is itself a tell. `defaultChrome()` does the matching thing for the executable — `google-chrome` is a Linux PATH name and finds nothing on Windows or macOS.
 - `--disable-blink-features=AutomationControlled` drops `navigator.webdriver` without the `--enable-automation` banner, which is itself a tell.
 - `Launch` removes stale `DevToolsActivePort` and `Singleton*` files; a killed Chrome otherwise blocks the next launch outright.
 - `Close` sends `Browser.close` rather than killing, so Chrome flushes cookies to the profile. Killing loses `cf_clearance`.
