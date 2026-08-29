@@ -13,6 +13,24 @@ This package evaluates JavaScript through `Page.createIsolatedWorld` +
 `Runtime.evaluate` with an explicit `contextId`, so the Runtime domain is never
 enabled. `browser_test.go` asserts the invariant.
 
+The same leak is already patched in the other ecosystems: `rebrowser-patches`
+(Node) and `Patchright` (Python, Node) reached the isolated-world fix
+independently of each other, which is a decent sign it is the convergent answer.
+Go had no equivalent — `chromedp-undetected` and `go-rod/stealth` stop at the
+fingerprint layer. That gap is what this fills.
+
+## Scope
+
+This is one layer, and a narrow one: the CDP control channel. It does not touch
+your TLS fingerprint, your IP, or your request rate, and it deliberately ships
+no proxy rotation, no concurrency pool, no CAPTCHA-service client, and no
+per-site selectors. Those are the parts that turn a driver into scraping
+infrastructure, and they belong in whatever is calling this, if anywhere.
+
+It exists because "which layer actually fails the challenge" was worth pinning
+down — the answer, `Runtime.enable`, is useful to a detector as well as to a
+client. Point it at origins you are allowed to automate.
+
 ## Use
 
 ```go
@@ -38,17 +56,8 @@ if err != nil {
 html, err := b.EvalString("document.body.innerHTML")
 ```
 
-It is a private module, so point Go at it directly:
-
 ```sh
-go env -w GOPRIVATE=github.com/SP42K/*
 go get github.com/SP42K/cfbrowse
-```
-
-Or consume it from a checkout without a remote at all:
-
-```sh
-go mod edit -replace github.com/SP42K/cfbrowse=/path/to/cfbrowse
 ```
 
 `Solve` clears an interactive challenge on its own, headless, from an empty

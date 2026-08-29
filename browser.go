@@ -411,6 +411,8 @@ func (b *Browser) Eval(js string) (json.RawMessage, error) {
 	var world struct {
 		ExecutionContextID int `json:"executionContextId"`
 	}
+	// grantUniveralAccess is misspelled in the CDP protocol itself, not here.
+	// Correcting it makes the parameter unknown and silently ignored.
 	if err := b.send(b.session, "Page.createIsolatedWorld", map[string]any{
 		"frameId": frame, "worldName": "cfbrowse", "grantUniveralAccess": true,
 	}, &world); err != nil {
