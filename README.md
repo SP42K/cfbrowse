@@ -9,20 +9,39 @@ and never sends `Runtime.enable`.
 
 ## Why
 
-Cloudflare's bot scoring reads the **control channel**, not just the page.
-`chromedp`, `go-rod`, `go-rod/stealth` and `chromedp-undetected` all patch the
-fingerprint layer (`navigator.webdriver`, UA, `window.chrome`) but still enable
-the Runtime domain on attach, and that alone is enough to fail a challenge.
+Cloudflare's bot scoring reads the **control channel**, not just the page, and
+the Go drivers differ in how much of themselves they put on it.
+
+| | `Runtime.enable` | JS runs in | closed shadow root |
+|---|---|---|---|
+| `chromedp` | sent on every attach | main world | out of reach |
+| `chromedp-undetected` | sent (wraps `chromedp`) | main world | out of reach |
+| `go-rod` | not sent | main world | out of reach |
+| `go-rod/stealth` | not sent (wraps `go-rod`) | main world | out of reach |
+| this | not sent | **isolated world** | `pierce: true` |
+
+`chromedp` calls `runtime.Enable()` on every target attach
+([chromedp.go:445][1]), to work out whether the target is a worker. Enabling
+the Runtime domain changes observable behaviour inside the page, and no amount
+of fingerprint patching hides it.
+
+`go-rod` avoids it, and deserves the credit: it never needs an
+`executionContextId`, so it takes an object id from a bare `Runtime.evaluate`
+and calls through `Runtime.callFunctionOn` instead. What it does not do is
+isolate — like every driver above it evaluates in the page's own world, where
+what you inject is visible to the page's own script.
 
 This package evaluates JavaScript through `Page.createIsolatedWorld` +
-`Runtime.evaluate` with an explicit `contextId`, so the Runtime domain is never
-enabled. `browser_test.go` asserts the invariant.
+`Runtime.evaluate` with an explicit `contextId`: no enable, and nothing shared
+with the page's globals. `browser_test.go` asserts the invariant.
 
-The same leak is already patched in the other ecosystems: `rebrowser-patches`
-(Node) and `Patchright` (Python, Node) reached the isolated-world fix
-independently of each other, which is a decent sign it is the convergent answer.
-Go had no equivalent — `chromedp-undetected` and `go-rod/stealth` stop at the
-fingerprint layer. That gap is what this fills.
+`rebrowser-patches` (Node) and `Patchright` (Python, Node) reached the
+isolated-world fix independently of each other, which is a decent sign it is
+the convergent answer. Go had no equivalent — `chromedp-undetected` and
+`go-rod/stealth` both stop at the fingerprint layer
+(`navigator.webdriver`, UA, `window.chrome`). That gap is what this fills.
+
+[1]: https://github.com/chromedp/chromedp/blob/master/chromedp.go#L445
 
 ## Scope
 
