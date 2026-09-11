@@ -1,6 +1,11 @@
 # cfbrowse
 
-Minimal Go CDP driver that never sends `Runtime.enable`.
+[![Go Reference](https://pkg.go.dev/badge/github.com/SP42K/cfbrowse.svg)](https://pkg.go.dev/github.com/SP42K/cfbrowse)
+[![Go Report Card](https://goreportcard.com/badge/github.com/SP42K/cfbrowse)](https://goreportcard.com/report/github.com/SP42K/cfbrowse)
+[![MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+Minimal Go CDP driver that clears a Cloudflare interactive challenge headless —
+and never sends `Runtime.enable`.
 
 ## Why
 
@@ -30,6 +35,16 @@ infrastructure, and they belong in whatever is calling this, if anywhere.
 It exists because "which layer actually fails the challenge" was worth pinning
 down — the answer, `Runtime.enable`, is useful to a detector as well as to a
 client. Point it at origins you are allowed to automate.
+
+## Intended use
+
+Point this at origins you own, or ones whose operator has authorised you to
+automate — your own staging and production sites, a customer's, a pentest or
+bug-bounty target inside its scope, an anti-bot vendor's own test pages.
+Automating someone else's site against its terms of service is on you, and
+several jurisdictions treat circumventing an access control as more than a
+contract problem. The detector side is a first-class use too: `Runtime.enable`
+is as useful to whoever writes the check as to whoever fails it.
 
 ## Use
 
