@@ -57,6 +57,8 @@ func defaultChrome() string {
 	return "google-chrome"
 }
 
+// Options configures Launch. The zero value launches headed Chrome with a
+// throwaway profile, which loses any cf_clearance when the process exits.
 type Options struct {
 	UserDataDir string // persistent profile; keeps cf_clearance between runs
 	Headless    bool
@@ -64,6 +66,8 @@ type Options struct {
 	UserAgent   string // defaults to the browser's own UA, see resolveUA
 }
 
+// Browser is one Chrome process and the single page target attached to it.
+// It is safe for concurrent use; there is no tab management.
 type Browser struct {
 	cmd       *exec.Cmd
 	conn      *websocket.Conn
@@ -379,6 +383,8 @@ func frozenUA(ua string) string {
 // cf_clearance have to store this alongside it; the cookie is scored against it.
 func (b *Browser) UserAgent() string { return b.userAgent }
 
+// Navigate returns as soon as Chrome accepts the command, not when the page has
+// loaded. Follow it with WaitReady, or with Solve if a challenge is expected.
 func (b *Browser) Navigate(url string) error {
 	return b.send(b.session, "Page.navigate", map[string]any{"url": url}, nil)
 }
@@ -440,6 +446,8 @@ func (b *Browser) Eval(js string) (json.RawMessage, error) {
 	return res.Result.Value, nil
 }
 
+// EvalString is Eval for expressions that return a string. A result that is not
+// a JSON string is returned as its raw JSON rather than as an error.
 func (b *Browser) EvalString(js string) (string, error) {
 	raw, err := b.Eval(js)
 	if err != nil {
@@ -783,6 +791,8 @@ func (b *Browser) SolveProgress(limit time.Duration, onStep func(phase string, a
 	}
 }
 
+// Cookie is the subset of a CDP cookie this package reads: enough to find
+// cf_clearance and tell which host issued it.
 type Cookie struct {
 	Name   string `json:"name"`
 	Value  string `json:"value"`
@@ -799,6 +809,9 @@ func (b *Browser) Cookies() ([]Cookie, error) {
 	return out.Cookies, err
 }
 
+// HasClearance reports whether a cf_clearance cookie exists. It says nothing
+// about whether the site still honours it — clearance expiry is silent, and the
+// only proof is a request that is not challenged.
 func (b *Browser) HasClearance() bool {
 	cs, err := b.Cookies()
 	if err != nil {
@@ -819,6 +832,8 @@ func (b *Browser) SentMethods() []string {
 	return append([]string(nil), b.sent...)
 }
 
+// Close shuts Chrome down through Browser.close so the profile keeps the
+// cookies earned this run, then kills the process if it does not exit.
 func (b *Browser) Close() error {
 	// Browser.close lets Chrome flush cookies to the profile; killing loses them.
 	b.send("", "Browser.close", map[string]any{}, nil)
