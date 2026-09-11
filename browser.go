@@ -541,17 +541,39 @@ const probeJS = `(() => {
 
 // cleared reports whether the interstitial is gone.
 //
-// This gates on the title, which was doubted once and should not be again. A
-// marker-based check (window._cf_chl_opt, #challenge-running) matched nothing
-// on a real interstitial and so declared a still-challenged page ready: it
-// returned success with no cf_clearance and no content. A false pass is worse
-// than a slow one.
+// clearedJS decides whether the page is still a Cloudflare interstitial.
+//
+// It looks for the script the interstitial loads to run the challenge, at
+// /cdn-cgi/challenge-platform/<h>/<x>/orchestrate/chl_page/v1. The /orchestrate/
+// segment is load-bearing: Bot Fight Mode serves a passive
+// /cdn-cgi/challenge-platform/scripts/jsd/main.js from the same directory on
+// pages that are already through, and matching that would wait forever.
+//
+// An earlier version gated on document.title not containing "Just a moment",
+// which is wrong twice over. Cloudflare localises the interstitial, so a client
+// whose Accept-Language is not English gets "請稍候...", "Un momento…" and so
+// on, and the check declares a still-challenged page ready — a false pass, with
+// no cf_clearance and no content. And a perfectly reachable page can have no
+// title at all, which the same check read as still-challenged.
+//
+// A marker-based check was tried before this and abandoned because
+// window._cf_chl_opt and #challenge-running matched nothing. The reason was not
+// that the markers were absent: window._cf_chl_opt is a *page global*, and this
+// package evaluates in an isolated world, which by construction cannot see the
+// page's globals. DOM nodes it can see. Measured on a live interstitial: the
+// orchestrate script is present, window._cf_chl_opt reads undefined.
+const clearedJS = `(() => {
+  if (location.href === "about:blank") return "blank";
+  if (document.querySelector('script[src*="/cdn-cgi/challenge-platform/"][src*="/orchestrate/"]')) return "challenged";
+  return document.readyState === "loading" ? "loading" : "cleared";
+})()`
+
 func (b *Browser) cleared() (bool, error) {
-	title, err := b.EvalString("document.title")
+	state, err := b.EvalString(clearedJS)
 	if err != nil {
 		return false, err
 	}
-	return title != "" && !strings.Contains(title, "Just a moment"), nil
+	return state == "cleared", nil
 }
 
 // challengeWidget locates the clickable challenge element through CDP.
