@@ -18,15 +18,17 @@ go run ./cmd/verify -solve 'https://…'                             # headed, t
 
 No linter config, no CI, one dependency (`github.com/coder/websocket`). Two files carry the whole project: `browser.go` and `cmd/verify/main.go`.
 
-The module path is `github.com/SP42K/cfbrowse` and the repo is private, so consumers need `GOPRIVATE=github.com/SP42K/*` or a `go mod edit -replace` pointing at a local checkout. `browser.go` is the library; `cmd/verify` is a demo and a test harness, and nothing in it should ever become a dependency of the package.
+The module path is `github.com/SP42K/cfbrowse`. `cfbrowse-tools` consumes it through a `replace` pointing at a local checkout, which is why nothing here needs `GOPRIVATE`. `browser.go` is the library; `cmd/verify` is a demo and a test harness, and nothing in it should ever become a dependency of the package.
 
 **`Solve` handles interactive challenges unattended, headless, from an empty profile.** Measured across two sites that both serve interactive challenges: headed and headless gave identical results (sixteen mouse events, `cf_clearance` obtained, full content). Do not reintroduce the claim that a human is needed for the first run — it was true of an earlier design and is not true now.
 
 ## The invariant
 
-The package exists for exactly one property: **`Runtime.enable` is never sent.** Anti-bot vendors probe the control channel, and enabling the Runtime domain is observable from inside the page regardless of fingerprint patching — that is why chromedp/go-rod/stealth variants fail Cloudflare.
+The package exists for exactly one property: **`Runtime.enable` is never sent.** Anti-bot vendors probe the control channel, and enabling the Runtime domain is observable from inside the page regardless of fingerprint patching.
 
-`Browser.send` records every CDP method in `b.sent`; `TestNeverEnablesRuntime` asserts `Runtime.enable` never appears after a full navigate + evaluate cycle. If a change makes that test fail, the package has no reason to exist. Treat it as the acceptance gate for anything touching CDP.
+Be precise about who actually does this, because an earlier version of this file and of the README were not. `chromedp` sends it on every target attach ([chromedp.go:445](https://github.com/chromedp/chromedp/blob/master/chromedp.go#L445)), only to work out whether the target is a worker, and `chromedp-undetected` inherits that. **`go-rod` does not send it at all** — `page_eval.go:333` takes an object id from a bare `Runtime.evaluate` and `page_eval.go:155` calls through `Runtime.callFunctionOn`, so it never needs an `executionContextId`; `go-rod/stealth` wraps go-rod and adds only fingerprint JS. What this package has over go-rod is the isolated world, not the enable.
+
+`Browser.send` records every CDP method in `b.sent`; `TestNeverEnablesRuntime` asserts that no `*.enable` other than `Page.enable` appears after a full navigate + evaluate cycle — an allowlist, which is stricter than a `Runtime.enable` denylist. If a change makes that test fail, the package has no reason to exist. Treat it as the acceptance gate for anything touching CDP.
 
 Consequences to respect when adding features:
 
