@@ -4,44 +4,86 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/SP42K/cfbrowse)](https://goreportcard.com/report/github.com/SP42K/cfbrowse)
 [![MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Minimal Go CDP driver that clears a Cloudflare interactive challenge headless —
-and never sends `Runtime.enable`.
+Minimal Go CDP driver that clears a Cloudflare interactive challenge headless,
+from an empty profile, with no human.
 
-## Why
+## What actually decides it
 
-Cloudflare's bot scoring reads the **control channel**, not just the page, and
-the Go drivers differ in how much of themselves they put on it.
+Measured, not asserted. Target was a host on a zone I own, behind a WAF custom
+rule set to `managed_challenge`, with my own origin logging request headers
+behind it. Same mac, same Chrome 152 binary, same UA, a fresh profile every run,
+arms interleaved. Each arm carried its own `?arm=` marker, so the origin's log
+is an independent record of which arm got past the edge rather than an
+inference from the driver's own report.
 
-| | `Runtime.enable` | JS runs in | closed shadow root |
+| arm | cleared | clicks | seconds | reached origin |
+|---|---|---|---|---|
+| `go-rod` + `go-rod/stealth` | 0/3 | 3 | 60s timeout | no |
+| `go-rod`, defaults | 0/3 | 3 | 60s timeout | no |
+| `go-rod`, minus `enable-automation` | 0/3 | 3 | 60s timeout | no |
+| `go-rod`, launch flags identical to this | 0/3 | 3 | 60s timeout | no |
+| **`go-rod` + `NoDefaultDevice()`** | **3/3** | 1 | 7–11s | yes |
+| `go-rod`, device with a current UA | 3/3 | 2–3 | 16–26s | yes |
+| this | 3/3 | 1 | 6–10s | yes |
+
+The click layer was the same code in every `go-rod` arm, so the arms differ only
+where the table says they do.
+
+**The tell is `rod.New()`'s default device emulation, not the control channel.**
+`go-rod` emulates `devices.LaptopWithMDPIScreen` on every new page, which sends
+`Network.setUserAgentOverride`. Reading the headers that actually go out (over
+`localhost`, which is a secure context, so Chrome sends the hints):
+
+| | `User-Agent` | `Sec-CH-UA` | `Accept-Language` |
 |---|---|---|---|
-| `chromedp` | sent on every attach | main world | out of reach |
-| `chromedp-undetected` | sent (wraps `chromedp`) | main world | out of reach |
-| `go-rod` | not sent | main world | out of reach |
-| `go-rod/stealth` | not sent (wraps `go-rod`) | main world | out of reach |
-| this | not sent | **isolated world** | `pierce: true` |
+| `go-rod` defaults | `Chrome/114` | **absent** | `en` |
+| device with `UserAgent` + `AcceptLanguage` set | `Chrome/152` | **absent** | `zh-TW` |
+| `NoDefaultDevice()` | `Chrome/152` | `"Chromium";v="152", …` | the real list |
 
-`chromedp` calls `runtime.Enable()` on every target attach
-([chromedp.go:445][1]), to work out whether the target is a worker. Enabling
-the Runtime domain changes observable behaviour inside the page, and no amount
-of fingerprint patching hides it.
+Three tells at once: the device's UA is hardcoded at `Chrome/114.0.0.0`, 38
+releases stale, and it silently overrides the `--user-agent` launch flag; the
+override carries no `userAgentMetadata`, so Chrome stops sending `Sec-CH-UA`
+entirely — a browser claiming to be Chrome 114 with no client hints at all,
+which no real Chrome since 89 has been; and `navigator.languages` collapses to
+`["en"]`. Setting the device's `UserAgent` fixes the first and not the second,
+which is the row that clears but takes two to three clicks.
 
-`go-rod` avoids it, and deserves the credit: it never needs an
-`executionContextId`, so it takes an object id from a bare `Runtime.evaluate`
-and calls through `Runtime.callFunctionOn` instead. What it does not do is
-isolate — like every driver above it evaluates in the page's own world, where
-what you inject is visible to the page's own script.
+One line fixes it for `go-rod` users:
 
-This package evaluates JavaScript through `Page.createIsolatedWorld` +
-`Runtime.evaluate` with an explicit `contextId`: no enable, and nothing shared
-with the page's globals. `browser_test.go` asserts the invariant.
+```go
+browser := rod.New().ControlURL(u).NoDefaultDevice()
+```
 
-`rebrowser-patches` (Node) and `Patchright` (Python, Node) reached the
-isolated-world fix independently of each other, which is a decent sign it is
-the convergent answer. Go had no equivalent — `chromedp-undetected` and
-`go-rod/stealth` both stop at the fingerprint layer
-(`navigator.webdriver`, UA, `window.chrome`). That gap is what this fills.
+Reported upstream on [go-rod/rod#1208][1].
 
-[1]: https://github.com/chromedp/chromedp/blob/master/chromedp.go#L445
+### What this package is, given that
+
+Not faster and not stronger: `go-rod` with that one line matches it. What this
+has is that it never calls the override path in the first place — a UA here is
+a launch flag, because `Emulation.setUserAgentOverride` was measured to fail
+with the exact string that passes as `--user-agent`, and the flag also
+suppresses the client hints that would otherwise contradict it.
+
+The rest is properties, not advantages:
+
+- **No `Runtime.enable`, ever.** `browser_test.go` asserts it as an allowlist —
+  any `*.enable` other than `Page.enable` fails the test. `chromedp` does send
+  it on every target attach ([chromedp.go:445][2]), to work out whether the
+  target is a worker. `go-rod` does not, and deserves the credit: it never needs
+  an `executionContextId`, so it takes an object id from a bare
+  `Runtime.evaluate` and calls through `Runtime.callFunctionOn` instead. On the
+  evidence above, this was not what any of the arms turned on.
+- **JS evaluates in an isolated world**, via `Page.createIsolatedWorld` +
+  `Runtime.evaluate` with an explicit `contextId`, so nothing injected is
+  visible to the page's own script. The `NoDefaultDevice()` arm evaluates in the
+  main world and cleared 3/3, so this is a property worth having, not the
+  reason anything passed.
+- **The widget is found through CDP, not JavaScript.** `DOM.getDocument` with
+  `pierce: true` walks closed shadow roots. This is not exclusive either —
+  it is plain CDP and works the same from `go-rod`.
+
+[1]: https://github.com/go-rod/rod/issues/1208
+[2]: https://github.com/chromedp/chromedp/blob/master/chromedp.go#L445
 
 ## Scope
 
@@ -52,8 +94,9 @@ per-site selectors. Those are the parts that turn a driver into scraping
 infrastructure, and they belong in whatever is calling this, if anywhere.
 
 It exists because "which layer actually fails the challenge" was worth pinning
-down — the answer, `Runtime.enable`, is useful to a detector as well as to a
-client. Point it at origins you are allowed to automate.
+down. The answer turned out to be the UA override path, which is as useful to
+whoever writes the check as to whoever fails it. Point it at origins you are
+allowed to automate.
 
 ## Intended use
 
@@ -62,8 +105,9 @@ automate — your own staging and production sites, a customer's, a pentest or
 bug-bounty target inside its scope, an anti-bot vendor's own test pages.
 Automating someone else's site against its terms of service is on you, and
 several jurisdictions treat circumventing an access control as more than a
-contract problem. The detector side is a first-class use too: `Runtime.enable`
-is as useful to whoever writes the check as to whoever fails it.
+contract problem. The detector side is a first-class use too: a missing
+`Sec-CH-UA` behind a stale UA string is as useful to whoever writes the check
+as to whoever fails it.
 
 ## Use
 
